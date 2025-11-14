@@ -81,12 +81,17 @@ class BPRegressionModel(nn.Module):
         self.cnn = nn.Sequential(
             nn.Conv3d(1, 16, kernel_size=(3, 3, 3), stride=(1, 1, 1), padding=1),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            nn.MaxPool3d(kernel_size=(2, 2, 2)), # 100 -> 50, 64 -> 32
             nn.Conv3d(16, 32, kernel_size=(3, 3, 3), stride=(1, 1, 1), padding=1),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            nn.MaxPool3d(kernel_size=(2, 2, 2)), # 50 -> 25, 32 -> 16
             nn.Flatten()
         )
+        # Input size = 32 channels * 25 frames * 16 height * 16 width = 204800
+        # This 204800 needs to be split into (seq_len, features) for the LSTM
+        # The seq_len is 25 (from the pooling)
+        # The features are 32*16*16 = 8192
+        # So the LSTM input size is 8192
         self.lstm = nn.LSTM(input_size=8192, hidden_size=128, num_layers=1, batch_first=True)
         self.fc = nn.Sequential(
             nn.Linear(128 + 1, 64),
@@ -94,28 +99,41 @@ class BPRegressionModel(nn.Module):
             nn.Linear(64, 2) 
         )
 
+    # --- THIS IS THE CORRECTED FUNCTION ---
     def forward(self, x, bpm):
-        # x is (1, 100, 64, 64)
+        # x's initial shape is (1, 100, 64, 64)
         
-        # We need to add the channel dimension: (1, 1, 100, 64, 64)
-        x = x.unsqueeze(1) # Add channel dimension
+        # Add channel dimension for Conv3d: (1, 1, 100, 64, 64)
+        x = x.unsqueeze(1) 
         
-        # --- THE BUG WAS HERE: The bad line is REMOVED ---
+        # self.cnn contains Conv, Pool, Conv, Pool, Flatten
+        # cnn_out shape is (batch_size, 32*25*16*16) = (1, 204800)
+        cnn_out = self.cnn(x) 
         
-        # cnn_out shape: (1, 32, 25, 16, 16)
-        cnn_out = self.cnn(x)
+        # We need to reshape it for the LSTM.
+        # LSTM expects (batch, seq_len, features)
+        # The CNN/Pool layers reduced the frame dim from 100 to 25.
+        # The LSTM input size is 8192 (32*16*16).
+        # 25 * 8192 = 204800. This matches.
         
-        # We need to permute and flatten for LSTM
-        # (batch, channels, frames, h, w) -> (batch, frames, features)
-        cnn_out = cnn_out.permute(0, 2, 1, 3, 4) # (1, 25, 32, 16, 16)
+        # Get batch_size dynamically
+        batch_size = x.size(0) 
         
-        # Flatten the last 3 dims
-        batch_size, frames_dim, c, h, w = cnn_out.size()
-        cnn_out = cnn_out.reshape(batch_size, frames_dim, -1) # (1, 25, 32*16*16)
+        # Reshape to (batch_size, 25, 8192)
+        # 25 is the sequence length (downsampled from 100 frames)
+        # 8192 is the feature size (32*16*16)
+        cnn_out = cnn_out.view(batch_size, 25, 8192)
         
+        # Now pass to LSTM
         lstm_out, _ = self.lstm(cnn_out)
+        
+        # Get the last time step's output
         lstm_last_out = lstm_out[:, -1, :] 
+        
+        # Combine with BPM
         combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)
+        
+        # Pass to final fully connected layers
         output = self.fc(combined)
         return output
 
@@ -125,6 +143,7 @@ def load_model():
     model = BPRegressionModel()
     
     # Load model state dict, mapping to CPU
+    # This ensures it works on Streamlit's CPU-only servers
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
     model.eval()
     return model
@@ -132,11 +151,12 @@ def load_model():
 
 def predict_bp(model, video_path):
     bpm = extract_bpm(video_path)
-    video_data = load_video_frames(video_path) # Shape: (1, 100, 64, 64)
+    # video_data shape is (1, 100, 64, 64)
+    video_data = load_video_frames(video_path) 
     with torch.no_grad():
+        # Pass the 4D tensor to the model; forward() will add the 5th dim
         prediction = model(video_data, torch.tensor([bpm]).float())
     systolic, diastolic = prediction.squeeze().tolist()
     
-    # --- THIS IS THE CHANGE FOR THE SIDEBAR APP ---
+    # This returns 3 values as expected by app.py
     return systolic, diastolic, bpm
-    # ---
