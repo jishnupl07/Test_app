@@ -105,9 +105,15 @@ class BPRegressionModel(nn.Module):
         # If 4D, add channel dimension to make it 5D: (batch_size, 1, frames, height, width)
         if x.dim() == 4:
             x = x.unsqueeze(1)  # Add channel dimension: (batch, frames, h, w) -> (batch, 1, frames, h, w)
+        elif x.dim() != 5:
+            raise ValueError(f"Expected 4D or 5D input, got {x.dim()}D tensor with shape {x.shape}")
         
         # Now x is 5D: (batch_size, channels, frames, height, width)
         # e.g., (1, 1, 100, 64, 64)
+        # Verify the shape
+        if x.dim() != 5:
+            raise ValueError(f"After processing, x should be 5D, but got {x.dim()}D tensor with shape {x.shape}")
+        
         batch_size = x.size(0)
         
         # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
@@ -133,7 +139,31 @@ def load_model():
     
     # Load model state dict, mapping to CPU
     # This ensures it works on Streamlit's CPU-only servers
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+    try:
+        loaded = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+        
+        # Handle both state_dict and full model saves
+        if isinstance(loaded, dict):
+            if 'state_dict' in loaded:
+                # Checkpoint format with state_dict key
+                model.load_state_dict(loaded['state_dict'], strict=False)
+            else:
+                # Direct state dict
+                model.load_state_dict(loaded, strict=False)
+        elif isinstance(loaded, nn.Module):
+            # Full model was saved - extract state dict and load into our new model
+            # This ensures we use our updated forward method
+            try:
+                model.load_state_dict(loaded.state_dict(), strict=False)
+            except Exception as e:
+                # If that fails, try to copy the state dict directly
+                model.load_state_dict(loaded.state_dict())
+        else:
+            raise ValueError(f"Unexpected model file format: {type(loaded)}")
+            
+    except Exception as e:
+        raise RuntimeError(f"Error loading model from {MODEL_PATH}: {e}")
+    
     model.eval()
     return model
 
@@ -147,12 +177,32 @@ def predict_bp(model, video_path):
     # The model's forward method will add the channel dimension
     if video_data.dim() != 4:
         # Handle unexpected dimensions
-        if video_data.dim() == 5 and video_data.size(1) == 1:
-            # Remove extra channel dimension if present
-            video_data = video_data.squeeze(1)
+        if video_data.dim() == 5:
+            # If already 5D, check if we need to squeeze
+            if video_data.size(1) == 1:
+                # Remove extra channel dimension if present
+                video_data = video_data.squeeze(1)
+            else:
+                # Already has channel dimension, keep as is but verify shape
+                pass
         elif video_data.dim() == 3:
             # Add batch dimension if missing
             video_data = video_data.unsqueeze(0)
+        else:
+            raise ValueError(f"Unexpected video_data dimensions: {video_data.dim()}D, shape: {video_data.shape}")
+    
+    # Verify final shape is 4D: (batch, frames, height, width)
+    if video_data.dim() != 4:
+        raise ValueError(f"video_data should be 4D after processing, but got {video_data.dim()}D with shape {video_data.shape}")
+    
+    # Ensure shape is (batch, 100, 64, 64)
+    expected_shape = (1, 100, 64, 64)
+    if video_data.shape != expected_shape:
+        # Try to reshape if possible
+        if video_data.numel() == np.prod(expected_shape):
+            video_data = video_data.view(expected_shape)
+        else:
+            raise ValueError(f"video_data shape {video_data.shape} doesn't match expected {expected_shape}")
     
     with torch.no_grad():
         # Model's forward method will add the channel dimension internally
