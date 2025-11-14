@@ -5,7 +5,7 @@ import torch.nn as nn
 from scipy.signal import find_peaks, butter, filtfilt, detrend
 import os
 
-# --- This finds the correct path to the model file ---
+# --- THIS FINDS THE MODEL FILE ON THE SERVER ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "bp_model_lstm.pth")
 # ---
@@ -87,8 +87,6 @@ class BPRegressionModel(nn.Module):
             nn.MaxPool3d(kernel_size=(2, 2, 2)), # 50 -> 25
             nn.Flatten()
         )
-        # LSTM input size must match the CNN feature output
-        # Features = 32 channels * 16 * 16 = 8192
         self.lstm = nn.LSTM(input_size=32 * 16 * 16, hidden_size=128, num_layers=1, batch_first=True)
         self.fc = nn.Sequential(
             nn.Linear(128 + 1, 64),
@@ -113,6 +111,7 @@ class BPRegressionModel(nn.Module):
         # Reshape for LSTM: (batch, seq_len, features)
         # The pooling layers reduced the frame dimension from 100 to 25.
         # We must reshape to (1, 25, 8192)
+        # 8192 = 32 * 16 * 16
         cnn_out = cnn_out.view(batch_size, 25, -1)
         
         # Pass to LSTM
@@ -128,8 +127,10 @@ class BPRegressionModel(nn.Module):
 
 def load_model():
     model = BPRegressionModel()
-    # Load model state dict, mapping to CPU
+    # --- THIS IS THE FIX ---
+    # Load model state dict, mapping to CPU and using the correct path
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+    # --- END OF FIX ---
     model.eval()
     return model
 
