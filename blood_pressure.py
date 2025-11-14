@@ -70,9 +70,15 @@ def load_video_frames(video_path, num_frames=100):
             frames = np.concatenate((np.stack(frames, axis=0), padding), axis=0)
         else:
             frames = padding
+    else:
+        # If we have enough frames, stack them
+        frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
     
-    frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
-    # Returns a 4D tensor: (batch=1, frames=100, height=64, width=64)
+    # Ensure frames is a numpy array with shape (num_frames, 64, 64)
+    if isinstance(frames, list):
+        frames = np.stack(frames, axis=0)
+    
+    # Convert to tensor and add batch dimension: (batch=1, frames=100, height=64, width=64)
     return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
 
 class BPRegressionModel(nn.Module):
@@ -95,26 +101,29 @@ class BPRegressionModel(nn.Module):
         )
 
     def forward(self, x, bpm):
-        # x is 5D: (batch_size, channels, frames, height, width)
+        # x can be 4D: (batch_size, frames, height, width) or 5D: (batch_size, channels, frames, height, width)
+        # If 4D, add channel dimension to make it 5D: (batch_size, 1, frames, height, width)
+        if x.dim() == 4:
+            x = x.unsqueeze(1)  # Add channel dimension: (batch, frames, h, w) -> (batch, 1, frames, h, w)
+        
+        # Now x is 5D: (batch_size, channels, frames, height, width)
         # e.g., (1, 1, 100, 64, 64)
-        batch_size, channels, frames, height, width = x.size()
+        batch_size = x.size(0)
         
         # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
-        # Output shape is (batch_size, 32 * 25 * 16 * 16) = (1, 204800)
+        # After pooling: frames 100->50->25, spatial 64->32->16
+        # Output shape after flatten: (batch_size, 32 * 25 * 16 * 16) = (batch_size, 204800)
         cnn_out = self.cnn(x)
         
-        # --- THIS IS THE BUG FIX ---
-        # Your original code used `frames` (which is 100)
-        # But the pooling layers reduced the frame dimension to 25.
-        # We must reshape based on the *output* frame dim (25).
-        # We are reshaping (1, 204800) into (1, 25, 8192)
+        # Reshape for LSTM: (batch_size, 204800) -> (batch_size, 25, 8192)
+        # The pooling layers reduced the frame dimension from 100 to 25
+        # Each frame has 32 * 16 * 16 = 8192 features
         cnn_out = cnn_out.view(batch_size, 25, -1)
-        # --- END OF BUG FIX ---
         
         lstm_out, _ = self.lstm(cnn_out)
-        lstm_last_out = lstm_out[:, -1, :] 
-        combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)
-        output = self.fc(combined)
+        lstm_last_out = lstm_out[:, -1, :]  # Take the last output: (batch_size, 128)
+        combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)  # (batch_size, 129)
+        output = self.fc(combined)  # (batch_size, 2)
         return output
 
 
@@ -131,15 +140,24 @@ def load_model():
 
 def predict_bp(model, video_path):
     bpm = extract_bpm(video_path)
-    # video_data is 4D: (1, 100, 64, 64)
-    video_data = load_video_frames(video_path) 
+    # video_data is 4D: (1, 100, 64, 64) - batch, frames, height, width
+    video_data = load_video_frames(video_path)
+    
+    # Ensure video_data has the correct 4D shape (batch, frames, height, width)
+    # The model's forward method will add the channel dimension
+    if video_data.dim() != 4:
+        # Handle unexpected dimensions
+        if video_data.dim() == 5 and video_data.size(1) == 1:
+            # Remove extra channel dimension if present
+            video_data = video_data.squeeze(1)
+        elif video_data.dim() == 3:
+            # Add batch dimension if missing
+            video_data = video_data.unsqueeze(0)
     
     with torch.no_grad():
-        # --- THIS IS THE FIX for the "5 vs 4" error ---
-        # We add the channel dimension here, just like your original code did.
-        # This makes video_data 5D: (1, 1, 100, 64, 64)
-        prediction = model(video_data.unsqueeze(1), torch.tensor([bpm]).float())
-        # --- END OF FIX ---
+        # Model's forward method will add the channel dimension internally
+        # Do NOT unsqueeze here, as the model already does it
+        prediction = model(video_data, torch.tensor([bpm]).float())
         
     systolic, diastolic = prediction.squeeze().tolist()
     
