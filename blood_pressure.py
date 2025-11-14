@@ -63,22 +63,10 @@ def load_video_frames(video_path, num_frames=100):
         count += 1
     cap.release()
     
-    if len(frames) < num_frames:
-        # Pad with zeros if video is too short
-        padding = np.zeros((num_frames - len(frames), 64, 64))
-        if len(frames) > 0:
-            frames = np.concatenate((np.stack(frames, axis=0), padding), axis=0)
-        else:
-            frames = padding
-    else:
-        # If we have enough frames, stack them
-        frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
+    # Stack frames: shape will be (num_frames, 64, 64)
+    frames = np.stack(frames, axis=0)
     
-    # Ensure frames is a numpy array with shape (num_frames, 64, 64)
-    if isinstance(frames, list):
-        frames = np.stack(frames, axis=0)
-    
-    # Convert to tensor and add batch dimension: (batch=1, frames=100, height=64, width=64)
+    # Convert to tensor and add batch dimension: (batch=1, frames, height=64, width=64)
     return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
 
 class BPRegressionModel(nn.Module):
@@ -101,35 +89,14 @@ class BPRegressionModel(nn.Module):
         )
 
     def forward(self, x, bpm):
-        # x can be 4D: (batch_size, frames, height, width) or 5D: (batch_size, channels, frames, height, width)
-        # If 4D, add channel dimension to make it 5D: (batch_size, 1, frames, height, width)
-        if x.dim() == 4:
-            x = x.unsqueeze(1)  # Add channel dimension: (batch, frames, h, w) -> (batch, 1, frames, h, w)
-        elif x.dim() != 5:
-            raise ValueError(f"Expected 4D or 5D input, got {x.dim()}D tensor with shape {x.shape}")
-        
-        # Now x is 5D: (batch_size, channels, frames, height, width)
+        # x is 5D: (batch_size, channels, frames, height, width)
         # e.g., (1, 1, 100, 64, 64)
-        # Verify the shape
-        if x.dim() != 5:
-            raise ValueError(f"After processing, x should be 5D, but got {x.dim()}D tensor with shape {x.shape}")
-        
-        batch_size = x.size(0)
-        
-        # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
-        # After pooling: frames 100->50->25, spatial 64->32->16
-        # Output shape after flatten: (batch_size, 32 * 25 * 16 * 16) = (batch_size, 204800)
-        cnn_out = self.cnn(x)
-        
-        # Reshape for LSTM: (batch_size, 204800) -> (batch_size, 25, 8192)
-        # The pooling layers reduced the frame dimension from 100 to 25
-        # Each frame has 32 * 16 * 16 = 8192 features
-        cnn_out = cnn_out.view(batch_size, 25, -1)
-        
+        batch_size, channels, frames, height, width = x.size()
+        cnn_out = self.cnn(x).view(batch_size, frames, -1)
         lstm_out, _ = self.lstm(cnn_out)
-        lstm_last_out = lstm_out[:, -1, :]  # Take the last output: (batch_size, 128)
-        combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)  # (batch_size, 129)
-        output = self.fc(combined)  # (batch_size, 2)
+        lstm_last_out = lstm_out[:, -1, :] 
+        combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)
+        output = self.fc(combined)
         return output
 
 
@@ -139,75 +106,20 @@ def load_model():
     
     # Load model state dict, mapping to CPU
     # This ensures it works on Streamlit's CPU-only servers
-    try:
-        loaded = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
-        
-        # Handle both state_dict and full model saves
-        if isinstance(loaded, dict):
-            if 'state_dict' in loaded:
-                # Checkpoint format with state_dict key
-                model.load_state_dict(loaded['state_dict'], strict=False)
-            else:
-                # Direct state dict
-                model.load_state_dict(loaded, strict=False)
-        elif isinstance(loaded, nn.Module):
-            # Full model was saved - extract state dict and load into our new model
-            # This ensures we use our updated forward method
-            try:
-                model.load_state_dict(loaded.state_dict(), strict=False)
-            except Exception as e:
-                # If that fails, try to copy the state dict directly
-                model.load_state_dict(loaded.state_dict())
-        else:
-            raise ValueError(f"Unexpected model file format: {type(loaded)}")
-            
-    except Exception as e:
-        raise RuntimeError(f"Error loading model from {MODEL_PATH}: {e}")
-    
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
     model.eval()
     return model
 
 
 def predict_bp(model, video_path):
     bpm = extract_bpm(video_path)
-    # video_data is 4D: (1, 100, 64, 64) - batch, frames, height, width
+    # video_data is 4D: (1, frames, 64, 64) - batch, frames, height, width
     video_data = load_video_frames(video_path)
     
-    # Ensure video_data has the correct 4D shape (batch, frames, height, width)
-    # The model's forward method will add the channel dimension
-    if video_data.dim() != 4:
-        # Handle unexpected dimensions
-        if video_data.dim() == 5:
-            # If already 5D, check if we need to squeeze
-            if video_data.size(1) == 1:
-                # Remove extra channel dimension if present
-                video_data = video_data.squeeze(1)
-            else:
-                # Already has channel dimension, keep as is but verify shape
-                pass
-        elif video_data.dim() == 3:
-            # Add batch dimension if missing
-            video_data = video_data.unsqueeze(0)
-        else:
-            raise ValueError(f"Unexpected video_data dimensions: {video_data.dim()}D, shape: {video_data.shape}")
-    
-    # Verify final shape is 4D: (batch, frames, height, width)
-    if video_data.dim() != 4:
-        raise ValueError(f"video_data should be 4D after processing, but got {video_data.dim()}D with shape {video_data.shape}")
-    
-    # Ensure shape is (batch, 100, 64, 64)
-    expected_shape = (1, 100, 64, 64)
-    if video_data.shape != expected_shape:
-        # Try to reshape if possible
-        if video_data.numel() == np.prod(expected_shape):
-            video_data = video_data.view(expected_shape)
-        else:
-            raise ValueError(f"video_data shape {video_data.shape} doesn't match expected {expected_shape}")
-    
     with torch.no_grad():
-        # Model's forward method will add the channel dimension internally
-        # Do NOT unsqueeze here, as the model already does it
-        prediction = model(video_data, torch.tensor([bpm]).float())
+        # Add channel dimension to make it 5D: (1, 1, frames, 64, 64)
+        # This matches the working version exactly
+        prediction = model(video_data.unsqueeze(1), torch.tensor([bpm]).float())
         
     systolic, diastolic = prediction.squeeze().tolist()
     
