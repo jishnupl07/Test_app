@@ -5,11 +5,10 @@ import torch.nn as nn
 from scipy.signal import find_peaks, butter, filtfilt, detrend
 import os
 
-# --- THIS IS THE CRUCIAL CHANGE ---
-# This block finds the correct path to the model file on the server
+# --- This finds the correct path to the model file ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "bp_model_lstm.pth")
-# --- END OF CHANGE ---
+# ---
 
 def extract_red_intensity(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -41,8 +40,6 @@ def calculate_bpm(peaks, frame_count, fps):
 
 def extract_bpm(video_path):
     intensities = extract_red_intensity(video_path)
-    # Assuming a fixed FPS if not available, which your code does.
-    # We'll try to get it from the main app, but this is a fallback.
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or fps is None:
@@ -90,7 +87,6 @@ class BPRegressionModel(nn.Module):
             nn.MaxPool3d(kernel_size=(2, 2, 2)),
             nn.Flatten()
         )
-        # Fix input size for LSTM: 32 * 16 * 16 = 8192
         self.lstm = nn.LSTM(input_size=8192, hidden_size=128, num_layers=1, batch_first=True)
         self.fc = nn.Sequential(
             nn.Linear(128 + 1, 64),
@@ -104,6 +100,8 @@ class BPRegressionModel(nn.Module):
         # We need to add the channel dimension: (1, 1, 100, 64, 64)
         x = x.unsqueeze(1) # Add channel dimension
         
+        # --- THE BUG WAS HERE: The bad line is REMOVED ---
+        
         # cnn_out shape: (1, 32, 25, 16, 16)
         cnn_out = self.cnn(x)
         
@@ -114,8 +112,6 @@ class BPRegressionModel(nn.Module):
         # Flatten the last 3 dims
         batch_size, frames_dim, c, h, w = cnn_out.size()
         cnn_out = cnn_out.reshape(batch_size, frames_dim, -1) # (1, 25, 32*16*16)
-        
-        # Your LSTM input_size is 32 * 16 * 16 = 8192. This matches.
         
         lstm_out, _ = self.lstm(cnn_out)
         lstm_last_out = lstm_out[:, -1, :] 
@@ -129,7 +125,6 @@ def load_model():
     model = BPRegressionModel()
     
     # Load model state dict, mapping to CPU
-    # This ensures it works on Streamlit's CPU-only servers
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
     model.eval()
     return model
@@ -141,6 +136,7 @@ def predict_bp(model, video_path):
     with torch.no_grad():
         prediction = model(video_data, torch.tensor([bpm]).float())
     systolic, diastolic = prediction.squeeze().tolist()
-    # --- THIS IS THE ONLY CHANGE ---
+    
+    # --- THIS IS THE CHANGE FOR THE SIDEBAR APP ---
     return systolic, diastolic, bpm
-    # --- END OF CHANGE ---
+    # ---
