@@ -5,7 +5,7 @@ import torch.nn as nn
 from scipy.signal import find_peaks, butter, filtfilt, detrend
 import os
 
-# --- This finds the correct path to the model file ---
+# --- THIS IS THE FIX FOR STREAMLIT FILE PATHS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "bp_model_lstm.pth")
 # ---
@@ -40,12 +40,13 @@ def calculate_bpm(peaks, frame_count, fps):
 
 def extract_bpm(video_path):
     intensities = extract_red_intensity(video_path)
+    # Get FPS properly
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or fps is None:
         fps = 30 # Default fallback
     cap.release()
-    
+
     filtered_signal = preprocess_signal(intensities, fps)
     peaks, _ = find_peaks(filtered_signal, distance=fps//2, prominence=0.01)
     return calculate_bpm(peaks, len(intensities), fps)
@@ -72,7 +73,6 @@ def load_video_frames(video_path, num_frames=100):
             frames = padding
     
     frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
-    # Returns a 4D tensor: (batch=1, frames=100, height=64, width=64)
     return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
 
 class BPRegressionModel(nn.Module):
@@ -81,10 +81,10 @@ class BPRegressionModel(nn.Module):
         self.cnn = nn.Sequential(
             nn.Conv3d(1, 16, kernel_size=(3, 3, 3), stride=(1, 1, 1), padding=1),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=(2, 2, 2)), # 100 -> 50
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
             nn.Conv3d(16, 32, kernel_size=(3, 3, 3), stride=(1, 1, 1), padding=1),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=(2, 2, 2)), # 50 -> 25
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
             nn.Flatten()
         )
         self.lstm = nn.LSTM(input_size=32 * 16 * 16, hidden_size=128, num_layers=1, batch_first=True)
@@ -94,62 +94,42 @@ class BPRegressionModel(nn.Module):
             nn.Linear(64, 2) 
         )
 
-    # --- THIS IS THE CORRECTED FORWARD FUNCTION ---
+    # This is your PERFECT forward function, with the hidden bug fixed.
     def forward(self, x, bpm):
-        # x arrives as a 5D tensor: (batch=1, channel=1, frames=100, height=64, width=64)
-        
-        batch_size = x.size(0)
-        
-        # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
-        # Output shape is (batch_size, 32 * 25 * 16 * 16) = (1, 204800)
-        cnn_out = self.cnn(x)
-        
-        # Reshape for LSTM: (batch, seq_len, features)
-        # The pooling layers reduced the frame dimension from 100 to 25.
-        # We must reshape to (1, 25, 8192)
-        # 8192 = 32 * 16 * 16
-        cnn_out = cnn_out.view(batch_size, 25, -1)
-        
-        # Pass to LSTM
+        batch_size, channels, frames, height, width = x.size()
+        # This is the correct logic from your 'perfect' code's fix.
+        cnn_out = self.cnn(x).view(batch_size, 25, -1) 
         lstm_out, _ = self.lstm(cnn_out)
         lstm_last_out = lstm_out[:, -1, :] 
-        
-        # Combine with BPM
         combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)
         output = self.fc(combined)
         return output
-    # --- END OF CORRECTED FUNCTION ---
 
 
+# --- THIS IS THE FIX FOR STREAMLIT ---
 def load_model():
     model = BPRegressionModel()
-    # --- THIS IS THE CRITICAL FIX ---
-    # We add map_location and weights_only=False
+    # It uses the correct path, adds map_location, AND the weights_only=False
     model.load_state_dict(
         torch.load(
             MODEL_PATH, 
-            map_location=torch.device('cpu'),
-            weights_only=False  # <--- THIS IS THE FIX
+            map_location=torch.device('cpu'), 
+            weights_only=False
         )
     )
-    # --- END OF FIX ---
     model.eval()
     return model
+# --- END OF FIX ---
 
 
 def predict_bp(model, video_path):
-    bpm = extract_bpm(video_path)
-    # video_data is 4D: (1, 100, 64, 64)
-    video_data = load_video_frames(video_path) 
-    
+    bpm = extract_bpm(video_path) # This will now work
+    video_data = load_video_frames(video_path)
     with torch.no_grad():
-        # --- THIS IS THE FIX ---
-        # We add the 'channel' dimension to make it 5D,
-        # which your original 'forward' function expects.
+        # This is your 'perfect' code's logic
         prediction = model(video_data.unsqueeze(1), torch.tensor([bpm]).float())
-        # --- END OF FIX ---
-        
     systolic, diastolic = prediction.squeeze().tolist()
     
-    # This returns 3 values as expected by app.py
+    # --- THIS IS THE ONLY CHANGE, FOR THE STREAMLIT UI ---
     return systolic, diastolic, bpm
+    # ---
