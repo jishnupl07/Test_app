@@ -72,7 +72,7 @@ def load_video_frames(video_path, num_frames=100):
             frames = padding
     
     frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
-    # Returns a 4D tensor: (1, 100, 64, 64)
+    # Returns a 4D tensor: (batch=1, frames=100, height=64, width=64)
     return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
 
 class BPRegressionModel(nn.Module):
@@ -87,11 +87,6 @@ class BPRegressionModel(nn.Module):
             nn.MaxPool3d(kernel_size=(2, 2, 2)), # 50 -> 25
             nn.Flatten()
         )
-        # The input feature size for LSTM must match the CNN output.
-        # After 2x pooling on frame dim, 100 -> 25.
-        # After 2x pooling on H/W, 64 -> 16.
-        # Features = 32 channels * 16 * 16 = 8192.
-        # This matches your original code.
         self.lstm = nn.LSTM(input_size=32 * 16 * 16, hidden_size=128, num_layers=1, batch_first=True)
         self.fc = nn.Sequential(
             nn.Linear(128 + 1, 64),
@@ -100,18 +95,19 @@ class BPRegressionModel(nn.Module):
         )
 
     def forward(self, x, bpm):
-        # x is 5D: (batch_size, channels, frames, height, width)
-        # e.g., (1, 1, 100, 64, 64)
-        batch_size, channels, frames, height, width = x.size()
+        # --- THIS IS THE BUG FIX ---
+        # The x tensor is now 5D: (1, 1, 100, 64, 64)
+        # The line "x = x.unsqueeze(1)" has been REMOVED.
+        # ---
+        
+        batch_size = x.size(0)
         
         # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
         # Output shape is (batch_size, 32 * 25 * 16 * 16) = (1, 204800)
         cnn_out = self.cnn(x)
         
-        # --- THIS IS THE BUG FIX ---
-        # Your original code used `frames` (which is 100)
-        # But the pooling layers reduced the frame dimension to 25.
-        # We must reshape based on the *output* frame dim (25).
+        # --- THIS IS THE SECOND BUG FIX ---
+        # We must reshape based on the *output* frame dim (25), not the input (100).
         # We are reshaping (1, 204800) into (1, 25, 8192)
         cnn_out = cnn_out.view(batch_size, 25, -1)
         # --- END OF BUG FIX ---
