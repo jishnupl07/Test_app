@@ -16,14 +16,15 @@ def load_bp_model():
     model = blood_pressure.load_model()
     return model
 
-# Load the model
+# Try to load the model. This will run once and be cached.
+bp_model = None
 try:
     bp_model = load_bp_model()
-    st.sidebar.success("BP Model Loaded Successfully")
 except Exception as e:
+    # If the model fails to load, we'll show an error on the sidebar
     st.sidebar.error(f"Error loading BP model: {e}")
     st.sidebar.error("Please ensure 'bp_model_lstm.pth' is in your GitHub repo.")
-    bp_model = None
+
 
 # --- Core BPM/PPG Functions (Your Original) ---
 def extract_red_intensity(video_path):
@@ -103,56 +104,54 @@ def signal_quality_check(intensities, peaks, properties, fps):
 
 # --- Streamlit App Interface ---
 
-st.set_page_config(layout="wide", page_title="Health Monitor (BPM & BP)")
-st.title("Health Monitor: BPM & Blood Pressure Calculator")
-st.write("Upload a video file (e.g., from a finger-tip recording) to calculate BPM and Blood Pressure.")
+st.set_page_config(layout="wide", page_title="Health Monitor")
 
-uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "mov", "avi", "mkv"])
+# --- Sidebar Navigation ---
+st.sidebar.title("Navigation")
+app_mode = st.sidebar.radio(
+    "Choose the analysis to perform:",
+    ("Heart Rate (BPM)", "Blood Pressure (BP)")
+)
 
-if uploaded_file is not None and bp_model is not None:
-    video_name = uploaded_file.name
-    
-    # Save to a temporary file path
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_name)[1]) as tmpfile:
-        tmpfile.write(uploaded_file.getvalue())
-        video_path = tmpfile.name
+# --- Main Page Logic ---
 
-    st.write(f"Processing video: `{video_name}`")
-    
-    # --- 1. BPM Calculation (for Plot) ---
-    with st.spinner("Analyzing signal for BPM plot..."):
-        intensities, frame_count, fps = extract_red_intensity(video_path)
-    
-    if intensities:
-        with st.spinner("Finding peaks for BPM..."):
-            normalized_intensities = normalize_intensities(intensities)
-            peaks, properties = find_peaks_in_intensity(normalized_intensities)
-            
-            is_valid_signal, snr = signal_quality_check(normalized_intensities, peaks, properties, fps)
-            
-            if not is_valid_signal:
-                st.error(f"The video '{video_name}' has poor signal quality (SNR: {snr:.2f}). Please use a better video with a clearer signal.")
-            else:
-                duration_in_seconds = frame_count / fps
-                bpm = calculate_bpm(peaks, duration_in_seconds)
+if app_mode == "Heart Rate (BPM)":
+    st.title("Heart Rate (BPM) Calculator")
+    st.write("Upload a video file (e.g., from a finger-tip recording) to calculate the BPM and see the PPG signal plot.")
+
+    uploaded_file = st.file_uploader("Choose a video file for BPM", type=["mp4", "mov", "avi", "mkv"], key="bpm_uploader")
+
+    if uploaded_file is not None:
+        video_name = uploaded_file.name
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_name)[1]) as tmpfile:
+            tmpfile.write(uploaded_file.getvalue())
+            video_path = tmpfile.name
+
+        st.write(f"Processing video: `{video_name}`")
+        
+        with st.spinner("Analyzing signal for BPM plot..."):
+            intensities, frame_count, fps = extract_red_intensity(video_path)
+        
+        if intensities:
+            with st.spinner("Finding peaks for BPM..."):
+                normalized_intensities = normalize_intensities(intensities)
+                peaks, properties = find_peaks_in_intensity(normalized_intensities)
+                is_valid_signal, snr = signal_quality_check(normalized_intensities, peaks, properties, fps)
                 
-                # --- 2. Blood Pressure Calculation ---
-                try:
-                    with st.spinner("Calculating Blood Pressure..."):
-                        # Call the function from your blood_pressure.py
-                        # It uses the video_path to do its own processing
-                        systolic, diastolic = blood_pressure.predict_bp(bp_model, video_path)
+                if not is_valid_signal:
+                    st.error(f"The video '{video_name}' has poor signal quality (SNR: {snr:.2f}). Please use a better video with a clearer signal.")
+                else:
+                    duration_in_seconds = frame_count / fps
+                    bpm = calculate_bpm(peaks, duration_in_seconds)
                     
                     st.success("Processing Complete!")
                     
-                    # --- 3. Display All Results ---
-                    col1, col2 = st.columns(2)
+                    col1, col2 = st.columns([1, 2]) # Make plot column wider
                     
                     with col1:
-                        st.subheader("Results")
+                        st.subheader("BPM Result")
                         st.metric(label="Calculated BPM", value=f"{bpm:.2f}")
-                        st.metric(label="Predicted Systolic BP", value=f"{systolic:.0f}")
-                        st.metric(label="Predicted Diastolic BP", value=f"{diastolic:.0f}")
                         
                         st.subheader("Video Info")
                         st.metric(label="Video Length", value=f"{duration_in_seconds:.2f} s")
@@ -163,13 +162,43 @@ if uploaded_file is not None and bp_model is not None:
                         st.subheader("Signal Plot (for BPM)")
                         plot = create_bpm_plot(normalized_intensities, peaks, video_name)
                         st.pyplot(plot)
+        
+        os.remove(video_path)
 
-                except Exception as e:
-                    st.error(f"An error occurred during Blood Pressure calculation: {e}")
-                    st.exception(e) # Show full error details
+elif app_mode == "Blood Pressure (BP)":
+    st.title("Blood Pressure (BP) Calculator")
+    st.write("Upload a video file to predict your Systolic and Diastolic blood pressure.")
 
-    # Clean up the temporary file
-    os.remove(video_path)
+    # Check if the model loaded correctly
+    if bp_model is None:
+        st.error("The Blood Pressure model could not be loaded. This feature is unavailable.")
+    else:
+        uploaded_file = st.file_uploader("Choose a video file for BP", type=["mp4", "mov", "avi", "mkv"], key="bp_uploader")
 
-elif bp_model is None:
-    st.error("The Blood Pressure model could not be loaded. The app cannot proceed.")
+        if uploaded_file is not None:
+            video_name = uploaded_file.name
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(video_name)[1]) as tmpfile:
+                tmpfile.write(uploaded_file.getvalue())
+                video_path = tmpfile.name
+            
+            st.write(f"Processing video: `{video_name}`")
+
+            try:
+                with st.spinner("Calculating Blood Pressure..."):
+                    # This now returns 3 values
+                    systolic, diastolic, internal_bpm = blood_pressure.predict_bp(bp_model, video_path)
+                
+                st.success("Processing Complete!")
+                
+                st.subheader("Blood Pressure Results")
+                col1, col2, col3 = st.columns(3)
+                col1.metric(label="Predicted Systolic BP", value=f"{systolic:.0f}")
+                col2.metric(label="Predicted Diastolic BP", value=f"{diastolic:.0f}")
+                col3.metric(label="BPM (used by model)", value=f"{internal_bpm:.2f}", help="This is the BPM calculated by the BP model as an input feature.")
+
+            except Exception as e:
+                st.error(f"An error occurred during Blood Pressure calculation: {e}")
+                st.exception(e)
+            
+            os.remove(video_path)
