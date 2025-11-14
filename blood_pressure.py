@@ -63,11 +63,16 @@ def load_video_frames(video_path, num_frames=100):
         count += 1
     cap.release()
     
-    # Stack frames: shape will be (num_frames, 64, 64)
-    frames = np.stack(frames, axis=0)
+    if len(frames) < num_frames:
+        # Pad with zeros if video is too short
+        padding = np.zeros((num_frames - len(frames), 64, 64))
+        if len(frames) > 0:
+            frames = np.concatenate((np.stack(frames, axis=0), padding), axis=0)
+        else:
+            frames = padding
     
-    # Convert to tensor and add batch dimension: (1, frames, 64, 64)
-    # This matches the working version exactly
+    frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
+    # Returns a 4D tensor: (batch=1, frames=100, height=64, width=64)
     return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
 
 class BPRegressionModel(nn.Module):
@@ -89,39 +94,60 @@ class BPRegressionModel(nn.Module):
             nn.Linear(64, 2) 
         )
 
+    # --- THIS IS THE CORRECTED FORWARD FUNCTION ---
     def forward(self, x, bpm):
-        # x is 5D: (batch_size, channels, frames, height, width)
-        # e.g., (1, 1, 100, 64, 64)
-        batch_size, channels, frames, height, width = x.size()
-        cnn_out = self.cnn(x).view(batch_size, frames, -1)
+        # x arrives as a 5D tensor: (batch=1, channel=1, frames=100, height=64, width=64)
+        
+        batch_size = x.size(0)
+        
+        # self.cnn(x) applies Conv, Pool, Conv, Pool, Flatten
+        # Output shape is (batch_size, 32 * 25 * 16 * 16) = (1, 204800)
+        cnn_out = self.cnn(x)
+        
+        # Reshape for LSTM: (batch, seq_len, features)
+        # The pooling layers reduced the frame dimension from 100 to 25.
+        # We must reshape to (1, 25, 8192)
+        # 8192 = 32 * 16 * 16
+        cnn_out = cnn_out.view(batch_size, 25, -1)
+        
+        # Pass to LSTM
         lstm_out, _ = self.lstm(cnn_out)
         lstm_last_out = lstm_out[:, -1, :] 
+        
+        # Combine with BPM
         combined = torch.cat((lstm_last_out, bpm.view(-1, 1)), dim=1)
         output = self.fc(combined)
         return output
+    # --- END OF CORRECTED FUNCTION ---
 
 
 def load_model():
-    # It now uses the MODEL_PATH variable
     model = BPRegressionModel()
-    
-    # Load model state dict, mapping to CPU
-    # This ensures it works on Streamlit's CPU-only servers
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+    # --- THIS IS THE CRITICAL FIX ---
+    # We add map_location and weights_only=False
+    model.load_state_dict(
+        torch.load(
+            MODEL_PATH, 
+            map_location=torch.device('cpu'),
+            weights_only=False  # <--- THIS IS THE FIX
+        )
+    )
+    # --- END OF FIX ---
     model.eval()
     return model
 
 
 def predict_bp(model, video_path):
     bpm = extract_bpm(video_path)
-    # video_data is 4D: (1, frames, 64, 64) - batch, frames, height, width
-    video_data = load_video_frames(video_path)
+    # video_data is 4D: (1, 100, 64, 64)
+    video_data = load_video_frames(video_path) 
     
     with torch.no_grad():
-        # Add channel dimension: (1, frames, 64, 64) -> (1, 1, frames, 64, 64)
-        # This matches the working version exactly: video_data.unsqueeze(0)
-        # Note: unsqueeze(0) on (1, frames, 64, 64) adds dimension at position 0, making it (1, 1, frames, 64, 64)
-        prediction = model(video_data.unsqueeze(0), torch.tensor([bpm]).float())
+        # --- THIS IS THE FIX ---
+        # We add the 'channel' dimension to make it 5D,
+        # which your original 'forward' function expects.
+        prediction = model(video_data.unsqueeze(1), torch.tensor([bpm]).float())
+        # --- END OF FIX ---
         
     systolic, diastolic = prediction.squeeze().tolist()
     
