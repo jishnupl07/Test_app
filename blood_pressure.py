@@ -5,7 +5,7 @@ import torch.nn as nn
 from scipy.signal import find_peaks, butter, filtfilt, detrend
 import os
 
-# --- THIS IS THE FIX FOR STREAMLIT FILE PATHS ---
+# --- This finds the correct path to the model file ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "bp_model_lstm.pth")
 # ---
@@ -73,7 +73,14 @@ def load_video_frames(video_path, num_frames=100):
             frames = padding
     
     frames = np.stack(frames, axis=0) if isinstance(frames, list) else frames
-    return torch.tensor(frames, dtype=torch.float32).unsqueeze(0)
+    
+    # --- THIS IS THE CHANGE ---
+    # 1. Convert to tensor -> (100, 64, 64)
+    # 2. Add batch dim -> (1, 100, 64, 64)
+    # 3. Add channel dim -> (1, 1, 100, 64, 64)
+    # This now returns the 5D tensor the model needs
+    return torch.tensor(frames, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
+    # --- END OF CHANGE ---
 
 class BPRegressionModel(nn.Module):
     def __init__(self):
@@ -94,7 +101,7 @@ class BPRegressionModel(nn.Module):
             nn.Linear(64, 2) 
         )
 
-    # This is your PERFECT forward function, with the hidden bug fixed.
+    # This is your PERFECT forward function
     def forward(self, x, bpm):
         batch_size, channels, frames, height, width = x.size()
         # This is the correct logic from your 'perfect' code's fix.
@@ -123,13 +130,20 @@ def load_model():
 
 
 def predict_bp(model, video_path):
-    bpm = extract_bpm(video_path) # This will now work
+    bpm = extract_bpm(video_path) 
+    
+    # --- THIS IS THE CHANGE ---
+    # load_video_frames now returns the 5D tensor directly
     video_data = load_video_frames(video_path)
+    # --- END OF CHANGE ---
+
     with torch.no_grad():
-        # This is your 'perfect' code's logic
-        prediction = model(video_data.unsqueeze(1), torch.tensor([bpm]).float())
+        # --- THIS IS THE CHANGE ---
+        # We no longer call .unsqueeze(1) because video_data is already 5D
+        prediction = model(video_data, torch.tensor([bpm]).float())
+        # --- END OF CHANGE ---
+        
     systolic, diastolic = prediction.squeeze().tolist()
     
-    # --- THIS IS THE ONLY CHANGE, FOR THE STREAMLIT UI ---
+    # This returns 3 values as expected by app.py
     return systolic, diastolic, bpm
-    # ---
